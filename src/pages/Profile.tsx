@@ -2,9 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
-import type { Database } from '@/integrations/supabase/types';
 import { useToast } from '@/hooks/use-toast';
-
 import { useNavigate } from 'react-router-dom';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,43 +10,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog';
+import { ArrowLeft, Calendar, Trash2, User } from 'lucide-react';
 
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow
-} from '@/components/ui/table';
-
-import {
-  ArrowLeft,
-  Calendar,
-  Trash2,
-  User
-} from 'lucide-react';
-
-type SubjectCode = Database['public']['Enums']['subject_code'];
-
-type AttendanceRecord = {
-  id: string;
-  subject: SubjectCode | string; // old data might be string
-  date: string;
-  note: string | null;
-};
-
-type TotalsRow = {
-  subject: SubjectCode;
-  count: number;
-  total: number;
-};
-
-const ALL_SUBJECTS: SubjectCode[] = ['CN','ADA','SE','PE','CS','PDS','CPDP'];
+type AttendanceRecord = { id: string; subject: string; date: string; note: string | null };
+type TotalsRow = { subject: string; count: number; total: number };
+type CatalogItem = { code: string; name: string; default_total: number };
 
 const Profile = () => {
   const { user } = useAuth();
@@ -56,32 +25,29 @@ const Profile = () => {
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
-
-  // profile basics
   const [name, setName] = useState<string>('Student');
   const [email, setEmail] = useState<string>('');
 
-  // logs
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<AttendanceRecord | null>(null);
 
-  // subjects (from attendance_totals)
   const [totalsRows, setTotalsRows] = useState<TotalsRow[]>([]);
   const rowsBySubject = useMemo(() => {
-    const m: Record<SubjectCode, TotalsRow> = {} as any;
-    totalsRows.forEach(r => { m[r.subject] = r; });
+    const m: Record<string, TotalsRow> = {};
+    totalsRows.forEach(r => (m[r.subject] = r));
     return m;
   }, [totalsRows]);
 
   // edit total dialog
   const [editOpen, setEditOpen] = useState(false);
-  const [editingSubject, setEditingSubject] = useState<SubjectCode | null>(null);
+  const [editingSubject, setEditingSubject] = useState<string | null>(null);
   const [editingTotalValue, setEditingTotalValue] = useState<number | string>('');
   const [editSaving, setEditSaving] = useState(false);
 
   // add subject
-  const [addSubject, setAddSubject] = useState<SubjectCode | ''>('');
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  const [addSubject, setAddSubject] = useState<string>('');
   const [addTotal, setAddTotal] = useState<string>('');
   const [adding, setAdding] = useState(false);
 
@@ -90,28 +56,30 @@ const Profile = () => {
     setLoading(true);
     try {
       // profile
-      const { data: prof, error: profErr } = await supabase
+      const { data: prof } = await supabase
         .from('profiles')
         .select('name, user_id')
         .eq('user_id', user.id)
         .maybeSingle();
-
-      if (!profErr && prof) setName(prof.name || 'Student');
+      if (prof) setName(prof.name || 'Student');
       setEmail(user.email || '');
 
-      // totals (user's configured subjects)
+      // subjects catalog
+      const { data: cat } = await supabase
+        .from('subjects_catalog')
+        .select('code, name, default_total')
+        .eq('is_active', true)
+        .order('code', { ascending: true });
+      setCatalog(cat || []);
+
+      // totals
       const { data: totals, error: totalsErr } = await supabase
         .from('attendance_totals')
         .select('subject, count, total')
         .eq('student_id', user.id)
         .order('subject', { ascending: true });
-
       if (totalsErr) throw totalsErr;
-      setTotalsRows((totals ?? []).map(r => ({
-        subject: r.subject as SubjectCode,
-        count: r.count ?? 0,
-        total: r.total ?? 0
-      })));
+      setTotalsRows((totals ?? []).map(r => ({ subject: r.subject, count: r.count ?? 0, total: r.total ?? 0 })));
 
       // logs
       const { data: logs, error: logsErr } = await supabase
@@ -119,7 +87,6 @@ const Profile = () => {
         .select('id, subject, date, note')
         .eq('student_id', user.id)
         .order('date', { ascending: false });
-
       if (logsErr) throw logsErr;
       setAttendanceRecords(logs ?? []);
     } catch (e: any) {
@@ -129,24 +96,19 @@ const Profile = () => {
     }
   };
 
-  // realtime: refresh on totals or logs change
   useEffect(() => {
     if (!user) return;
     fetchEverything();
 
     const chTotals = supabase
       .channel('rt-profile-totals')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'attendance_totals', filter: `student_id=eq.${user.id}` },
-        fetchEverything
-      ).subscribe();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_totals', filter: `student_id=eq.${user.id}` }, fetchEverything)
+      .subscribe();
 
     const chLogs = supabase
       .channel('rt-profile-logs')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'attendance', filter: `student_id=eq.${user.id}` },
-        fetchEverything
-      ).subscribe();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance', filter: `student_id=eq.${user.id}` }, fetchEverything)
+      .subscribe();
 
     return () => {
       try { supabase.removeChannel(chTotals); } catch {}
@@ -159,8 +121,8 @@ const Profile = () => {
     return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
   };
 
-  // --------- SUBJECT MANAGEMENT ----------
-  const openEditTotal = (subject: SubjectCode) => {
+  // subject edit total
+  const openEditTotal = (subject: string) => {
     const r = rowsBySubject[subject];
     if (!r) return;
     setEditingSubject(subject);
@@ -195,6 +157,7 @@ const Profile = () => {
     }
   };
 
+  // add subject
   const handleAddSubject = async () => {
     if (!user) return;
     if (!addSubject) {
@@ -215,7 +178,7 @@ const Profile = () => {
       });
       if (error) throw error;
 
-      // keep profile.selected_subjects tidy (optional)
+      // optional: maintain selected_subjects
       const nextSubjects = Array.from(new Set([...totalsRows.map(r => r.subject), addSubject]));
       await supabase.from('profiles').upsert({
         user_id: user.id,
@@ -234,32 +197,25 @@ const Profile = () => {
     }
   };
 
-  // --------- LOGS: DELETE with decrement ----------
+  // delete log + decrement
   const requestDeleteRecord = (rec: AttendanceRecord) => {
     setSelectedRecord(rec);
     setDeleteDialogOpen(true);
   };
 
   const handleDeleteAttendance = async () => {
-  if (!user || !selectedRecord) return;
-  try {
-    const { error } = await supabase.rpc('delete_log_and_decrement', {
-      p_id: selectedRecord.id,
-    });
-    if (error) throw error;
-
-    // Optimistic UI + refresh
-    setAttendanceRecords(prev => prev.filter(r => r.id !== selectedRecord.id));
-    toast({ title: 'Deleted', description: 'Attendance record removed and count updated.' });
-    setSelectedRecord(null);
-    setDeleteDialogOpen(false);
-    await fetchEverything();
-  } catch (e: any) {
-    toast({ title: 'Error', description: e?.message || 'Failed to delete attendance', variant: 'destructive' });
-  }
-};
-
-
+    if (!user || !selectedRecord) return;
+    try {
+      const { error } = await supabase.rpc('delete_log_and_decrement', { p_id: selectedRecord.id });
+      if (error) throw error;
+      toast({ title: 'Deleted', description: 'Attendance record removed and count updated.' });
+      setSelectedRecord(null);
+      setDeleteDialogOpen(false);
+      await fetchEverything();
+    } catch (e: any) {
+      toast({ title: 'Error', description: e?.message || 'Failed to delete attendance', variant: 'destructive' });
+    }
+  };
 
   if (loading) {
     return (
@@ -308,17 +264,14 @@ const Profile = () => {
           </CardContent>
         </Card>
 
-        {/* My Subjects (no groups/summary) */}
+        {/* My Subjects */}
         <Card className="mb-8 bg-white/80 backdrop-blur-sm border-0">
           <CardHeader>
             <CardTitle>My Subjects</CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
-            {/* Current subjects grid */}
             {totalsRows.length === 0 ? (
-              <div className="text-sm text-muted-foreground">
-                No subjects yet — add one below.
-              </div>
+              <div className="text-sm text-muted-foreground">No subjects yet — add one below.</div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {totalsRows.map(({ subject, count, total }) => {
@@ -345,28 +298,21 @@ const Profile = () => {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div className="md:col-span-1">
                 <Label className="text-sm">Add Subject</Label>
-                <Select value={addSubject} onValueChange={(v) => setAddSubject(v as SubjectCode)}>
+                <Select value={addSubject} onValueChange={(v) => setAddSubject(v)}>
                   <SelectTrigger className="mt-1">
                     <SelectValue placeholder="Pick a subject" />
                   </SelectTrigger>
                   <SelectContent>
-                    {ALL_SUBJECTS
-                      .filter(s => !totalsRows.some(r => r.subject === s))
-                      .map(code => <SelectItem key={code} value={code}>{code}</SelectItem>)
+                    {catalog
+                      .filter(c => !totalsRows.some(r => r.subject === c.code))
+                      .map(c => <SelectItem key={c.code} value={c.code}>{c.code} — {c.name}</SelectItem>)
                     }
                   </SelectContent>
                 </Select>
               </div>
               <div className="md:col-span-1">
                 <Label className="text-sm">Total Lectures</Label>
-                <Input
-                  className="mt-1"
-                  type="number"
-                  min={0}
-                  value={addTotal}
-                  onChange={(e) => setAddTotal(e.target.value)}
-                  placeholder="e.g., 40"
-                />
+                <Input className="mt-1" type="number" min={0} value={addTotal} onChange={(e) => setAddTotal(e.target.value)} placeholder="e.g., 20" />
               </div>
               <div className="md:col-span-1 flex items-end">
                 <Button className="w-full" onClick={handleAddSubject} disabled={adding}>
@@ -390,7 +336,7 @@ const Profile = () => {
               <>
                 {/* Desktop table */}
                 <div className="rounded-lg border overflow-x-auto hidden md:block">
-                  <Table className="min-w-[600px]">
+                  <Table className="min-w-[700px]">
                     <TableHeader>
                       <TableRow>
                         <TableHead>Date</TableHead>
@@ -404,12 +350,12 @@ const Profile = () => {
                         <TableRow key={record.id}>
                           <TableCell className="font-medium">{formatDate(record.date)}</TableCell>
                           <TableCell>{record.subject}</TableCell>
-                          <TableCell className="max-w-[320px] truncate">{record.note || '-'}</TableCell>
+                          <TableCell className="max-w-[360px] truncate">{record.note || '-'}</TableCell>
                           <TableCell>
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={() => requestDeleteRecord(record)}
+                              onClick={() => { setSelectedRecord(record); setDeleteDialogOpen(true); }}
                               className="text-destructive hover:text-destructive/90"
                             >
                               <Trash2 className="h-4 w-4" />
@@ -430,7 +376,7 @@ const Profile = () => {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => requestDeleteRecord(record)}
+                          onClick={() => { setSelectedRecord(record); setDeleteDialogOpen(true); }}
                           className="text-destructive hover:text-destructive/90"
                         >
                           <Trash2 className="h-4 w-4" />
@@ -489,10 +435,7 @@ const Profile = () => {
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
-            <Button
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={handleDeleteAttendance}
-            >
+            <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={handleDeleteAttendance}>
               Delete
             </Button>
           </DialogFooter>

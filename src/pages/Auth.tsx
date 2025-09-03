@@ -3,19 +3,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
-import type { Database } from '@/integrations/supabase/types';
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
-import { GraduationCap } from 'lucide-react';
+import { GraduationCap, X } from 'lucide-react';
 
-// enum union from your generated types ( 'CN' | 'ADA' | 'SE' | 'PE' | 'CS' | 'PDS' | 'CPDP' )
-type SubjectCode = Database['public']['Enums']['subject_code'];
-
-const SUBJECTS: SubjectCode[] = ['CN', 'ADA', 'SE', 'PE', 'CS', 'PDS', 'CPDP'];
+type CatalogItem = { code: string; name: string; default_total: number | null };
 const PENDING_KEY = 'pending_subject_setup_v1';
 
 const Auth = () => {
@@ -26,67 +22,50 @@ const Auth = () => {
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
 
-  // onboarding selection (signup only)
-  const [checked, setChecked] = useState<Record<SubjectCode, boolean>>(
-    () => Object.fromEntries(SUBJECTS.map(s => [s, false])) as Record<SubjectCode, boolean>
-  );
-  const [totals, setTotals] = useState<Record<SubjectCode, string>>(
-    () => Object.fromEntries(SUBJECTS.map(s => [s, ''])) as Record<SubjectCode, string>
-  );
+  // catalog + search
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+
+  // chosen subjects
+  const [chosen, setChosen] = useState<{ code: string; name: string; total: number }[]>([]);
 
   const [loading, setLoading] = useState(false);
-
   const { signUp, signIn, user } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // ---- helper: create attendance_totals rows (typed RPC, with fallback) ----
-  const createTotalsForUser = async (
-    userId: string,
-    codes: SubjectCode[],
-    totalsArr: number[]
-  ) => {
-    // Try the typed RPC first (forces the correct overload; avoids TS ambiguity)
-    const { error: rpcErr } = await supabase.rpc('set_subject_totals', {
-  p_subjects: codes,
-  p_totals: totalsArr,
-});
+  // Load catalog (public; RLS must allow anon SELECT where is_active = true)
+  useEffect(() => {
+    (async () => {
+      // quick sanity logs (remove later if you want)
+      // console.log('VITE_SUPABASE_URL?', import.meta.env.VITE_SUPABASE_URL);
+      // console.log('Anon key present?', !!import.meta.env.VITE_SUPABASE_ANON_KEY);
 
+      const { data, error } = await supabase
+        .from('subjects_catalog')
+        .select('code, name, default_total')
+        .eq('is_active', true)
+        .order('code', { ascending: true });
 
-    if (!rpcErr) return;
-
-    // Fallback: upsert per subject (DB column casts to enum)
-    for (let i = 0; i < codes.length; i++) {
-      const { error } = await supabase.from('attendance_totals').upsert({
-        student_id: userId,
-        subject: codes[i],
-        total: totalsArr[i] ?? 0,
-      });
       if (error) {
-        toast({
-          title: 'Subjects save failed',
-          description: error.message,
-          variant: 'destructive',
-        });
-        throw error;
+        setCatalogError(error.message || 'Failed to load subjects');
+        // console.error('subjects_catalog error:', error);
+      } else {
+        setCatalogError(null);
+        setCatalog(data || []);
       }
-    }
-  };
+    })();
+  }, []);
 
-  // derived list of selected subjects
-  const selectedCodes = useMemo(
-    () => SUBJECTS.filter(s => checked[s]),
-    [checked]
-  );
-
-  // Redirect if already authenticated AND no pending onboarding
+  // Redirect if already authed and no deferred onboarding pending
   useEffect(() => {
     if (!user) return;
     const hasPending = !!localStorage.getItem(PENDING_KEY);
     if (!hasPending) navigate('/dashboard', { replace: true });
   }, [user, navigate]);
 
-  // Commit any pending onboarding after email verification (session available)
+  // Commit deferred onboarding after email verification (when session exists)
   useEffect(() => {
     const run = async () => {
       if (!user) return;
@@ -96,34 +75,33 @@ const Auth = () => {
       try {
         const data = JSON.parse(raw) as {
           name: string;
-          codes: SubjectCode[];
+          codes: string[];
           totals: number[];
         };
 
-        // upsert profile
+        // 1) upsert profile
         const { error: profErr } = await supabase.from('profiles').upsert({
           user_id: user.id,
           name: data.name ?? '',
           selected_subjects: data.codes,
           onboarding_complete: true,
         });
-        if (profErr) {
-          toast({ title: 'Setup failed', description: profErr.message, variant: 'destructive' });
-          localStorage.removeItem(PENDING_KEY);
-          navigate('/dashboard', { replace: true });
-          return;
-        }
+        if (profErr) throw profErr;
 
-        // create totals rows
-        await createTotalsForUser(user.id, data.codes, data.totals);
+        // 2) create totals rows via RPC
+        const { error: rpcErr } = await supabase.rpc('set_subject_totals', {
+          p_subjects: data.codes,
+          p_totals: data.totals,
+        });
+        if (rpcErr) throw rpcErr;
 
         localStorage.removeItem(PENDING_KEY);
-        toast({ title: 'Welcome!', description: 'Your subjects have been saved.' });
+        toast({ title: 'Welcome!', description: 'Your subjects were saved.' });
         navigate('/dashboard', { replace: true });
       } catch (e: any) {
         toast({
           title: 'Setup failed',
-          description: e?.message || 'Could not finish onboarding.',
+          description: e?.message || 'Could not complete onboarding.',
           variant: 'destructive',
         });
         localStorage.removeItem(PENDING_KEY);
@@ -131,30 +109,41 @@ const Auth = () => {
       }
     };
     run();
-  }, [user, navigate]); // toast is stable enough not to include
+  }, [user, navigate, toast]);
 
-  // helpers
-  const setCheckedFor = (code: SubjectCode, value: boolean) =>
-    setChecked(prev => ({ ...prev, [code]: value }));
+  // Filtering the catalog by search and excluding already-chosen subjects
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const picked = new Set(chosen.map(c => c.code));
+    return catalog
+      .filter(c => !picked.has(c.code))
+      .filter(c => q === '' || c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+      .slice(0, 10);
+  }, [query, catalog, chosen]);
 
-  const setTotalFor = (code: SubjectCode, value: string) =>
-    setTotals(prev => ({ ...prev, [code]: value }));
-
-  const validateAndBuildPayload = () => {
-    if (selectedCodes.length === 0) {
-      return { ok: false, msg: 'Select at least one subject from the list.' } as const;
-    }
-    const t: number[] = [];
-    for (const code of selectedCodes) {
-      const n = Number(totals[code]);
-      if (!Number.isFinite(n) || n < 0) {
-        return { ok: false, msg: `Enter a valid non-negative total for ${code}.` } as const;
-      }
-      t.push(Math.floor(n));
-    }
-    return { ok: true, codes: selectedCodes, totals: t } as const;
+  // Add/remove/update chosen subjects
+  const addSubject = (c: CatalogItem) => {
+    const defaultTotal = (c.default_total ?? 20);
+    setChosen(prev => [...prev, { code: c.code, name: c.name, total: defaultTotal }]);
+    setQuery('');
   };
 
+  const removeSubject = (code: string) => {
+    setChosen(prev => prev.filter(s => s.code !== code));
+  };
+
+  const updateTotal = (code: string, value: string) => {
+    const n = Number(value);
+    setChosen(prev =>
+      prev.map(s =>
+        s.code === code
+          ? { ...s, total: !Number.isFinite(n) || n < 0 ? 0 : Math.floor(n) }
+          : s
+      ),
+    );
+  };
+
+  // Submit handler
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -166,52 +155,55 @@ const Auth = () => {
         return;
       }
 
-      // Sign Up path
+      // signup path
       if (!name.trim()) {
-        toast({ title: 'Missing name', description: 'Please enter your full name.', variant: 'destructive' });
+        toast({ title: 'Missing name', description: 'Enter your full name.', variant: 'destructive' });
         return;
       }
-      const v = validateAndBuildPayload();
-      if (!v.ok) {
-        toast({ title: 'Invalid selection', description: v.msg, variant: 'destructive' });
+      if (chosen.length === 0) {
+        toast({ title: 'Pick subjects', description: 'Add at least one subject.', variant: 'destructive' });
         return;
       }
 
-      // Create auth user (ensure your useAuth.signUp sends name to user_metadata)
       const { error } = await signUp(email, password, name);
       if (error) throw error;
 
-      // If email confirmations are OFF, you'll have a session right away
-      const { data: u } = await supabase.auth.getUser();
-      const userId = u.user?.id;
+      const { data } = await supabase.auth.getUser();
+      const userId = data.user?.id;
+
+      const codes = chosen.map(s => s.code);
+      const totals = chosen.map(s => s.total);
 
       if (userId) {
-        // 1) upsert profile
+        // Email confirmation OFF: we have a session, write immediately
         const { error: profErr } = await supabase.from('profiles').upsert({
           user_id: userId,
           name: name.trim(),
-          selected_subjects: v.codes,
+          selected_subjects: codes,
           onboarding_complete: true,
         });
         if (profErr) throw profErr;
 
-        // 2) create totals rows (typed RPC with fallback)
-        await createTotalsForUser(userId, v.codes, v.totals);
-
-        toast({ title: 'Account created', description: 'Your subjects have been saved.' });
+        const { error: rpcErr } = await supabase.rpc('set_subject_totals', {
+          p_subjects: codes,
+          p_totals: totals,
+        });
+        if (rpcErr) {
+          toast({ title: 'Subject setup failed', description: rpcErr.message, variant: 'destructive' });
+        } else {
+          toast({ title: 'Account created', description: 'Your subjects were saved.' });
+        }
         navigate('/dashboard');
       } else {
-        // Email confirmation ON → defer via localStorage
-        localStorage.setItem(PENDING_KEY, JSON.stringify({
-          name: name.trim(),
-          codes: v.codes,
-          totals: v.totals,
-        }));
+        // Email confirmation ON: defer via localStorage
+        localStorage.setItem(
+          PENDING_KEY,
+          JSON.stringify({ name: name.trim(), codes, totals }),
+        );
         toast({
           title: 'Verify your email',
-          description: 'We sent you a link. After you verify, your subjects will be saved automatically.',
+          description: 'After verification, your subjects will be saved automatically.',
         });
-        // stay here; the useEffect will commit after verification
       }
     } catch (err: any) {
       toast({ title: 'Error', description: err?.message || 'Something went wrong.', variant: 'destructive' });
@@ -222,7 +214,7 @@ const Auth = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
-      <Card className="w-full max-w-xl shadow-xl">
+      <Card className="w-full max-w-2xl shadow-xl">
         <CardHeader className="text-center space-y-4">
           <div className="flex justify-center">
             <div className="p-3 bg-primary rounded-full">
@@ -232,7 +224,7 @@ const Auth = () => {
           <div>
             <CardTitle className="text-2xl font-bold">Student Attendance</CardTitle>
             <CardDescription>
-              {isLogin ? 'Sign in to track your attendance' : 'Create your account and set up your subjects'}
+              {isLogin ? 'Sign in to track your attendance' : 'Create your account and add your subjects'}
             </CardDescription>
           </div>
         </CardHeader>
@@ -242,100 +234,96 @@ const Auth = () => {
             {!isLogin && (
               <div className="space-y-2">
                 <Label htmlFor="name">Full Name</Label>
-                <Input
-                  id="name"
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Enter your full name"
-                  required={!isLogin}
-                />
+                <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" required />
               </div>
             )}
 
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="Enter your email"
-                required
-              />
+              <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required />
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
-                required
-                minLength={6}
-              />
+              <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" minLength={6} required />
             </div>
 
-            {/* Signup-only: fixed subjects selection + totals */}
+            {/* Signup-only: subject search + chosen list */}
             {!isLogin && (
               <div className="space-y-3">
-                <Label className="text-base">Select Subjects & Totals</Label>
+                <Label className="text-base">Add Subjects</Label>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {SUBJECTS.map((code) => (
-                    <div key={code} className="rounded-lg border p-3 bg-white/80">
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4"
-                          checked={checked[code]}
-                          onChange={(e) => setCheckedFor(code, e.target.checked)}
-                        />
-                        <span className="font-medium">{code}</span>
-                      </label>
+                <Input
+                  placeholder="Search by code or name (e.g., CN, Networks)…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
 
-                      <div className="mt-2">
-                        <Label htmlFor={`tot-${code}`} className="text-xs text-muted-foreground">
-                          Total for {code}
-                        </Label>
-                        <Input
-                          id={`tot-${code}`}
-                          type="number"
-                          min={0}
-                          placeholder="e.g., 40"
-                          value={totals[code]}
-                          onChange={(e) => setTotalFor(code, e.target.value)}
-                          disabled={!checked[code]}
-                        />
-                      </div>
+                {catalogError && (
+                  <div className="text-sm text-red-600 border border-red-200 bg-red-50 rounded p-2">
+                    {catalogError}
+                  </div>
+                )}
+
+                {query.trim() !== '' && (
+                  <div className="border rounded-md bg-white/80 backdrop-blur-sm max-h-56 overflow-auto">
+                    {filtered.length === 0 ? (
+                      <div className="p-3 text-sm text-muted-foreground">No matching subjects</div>
+                    ) : (
+                      filtered.map((c) => (
+                        <button
+                          key={c.code}
+                          type="button"
+                          className="w-full text-left px-3 py-2 hover:bg-muted/50"
+                          onClick={() => addSubject(c)}
+                        >
+                          <div className="font-medium">{c.code}</div>
+                          <div className="text-xs text-muted-foreground">{c.name}</div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {chosen.length > 0 && (
+                  <div className="space-y-2">
+                    <Label className="text-sm">Selected</Label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {chosen.map((s) => (
+                        <div key={s.code} className="rounded-lg border p-3 bg-white/80">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="font-semibold">{s.code}</div>
+                              <div className="text-xs text-muted-foreground">{s.name}</div>
+                            </div>
+                            <button type="button" onClick={() => removeSubject(s.code)} className="p-1 hover:opacity-80">
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                          <div className="mt-2">
+                            <Label className="text-xs">Total (default {s.total})</Label>
+                            <Input
+                              type="number"
+                              min={0}
+                              value={s.total}
+                              onChange={(e) => updateTotal(s.code, e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                )}
               </div>
             )}
 
             <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? (
-                <div className="flex items-center space-x-2">
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-foreground"></div>
-                  <span>{isLogin ? 'Signing in…' : 'Creating account…'}</span>
-                </div>
-              ) : isLogin ? (
-                'Sign In'
-              ) : (
-                'Create Account'
-              )}
+              {loading ? (isLogin ? 'Signing in…' : 'Creating account…') : isLogin ? 'Sign In' : 'Create Account'}
             </Button>
           </form>
 
           <div className="text-center">
-            <Button
-              variant="link"
-              onClick={() => setIsLogin(!isLogin)}
-              className="text-sm"
-            >
+            <Button variant="link" onClick={() => setIsLogin(!isLogin)} className="text-sm">
               {isLogin ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
             </Button>
           </div>
