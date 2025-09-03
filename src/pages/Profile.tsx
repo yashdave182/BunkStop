@@ -9,29 +9,37 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
 import { ArrowLeft, Calendar, Trash2, User } from 'lucide-react';
 
+// --- Types -------------------------------------------------------------------
 type AttendanceRecord = { id: string; subject: string; date: string; note: string | null };
 type TotalsRow = { subject: string; count: number; total: number };
-type CatalogItem = { code: string; name: string; default_total: number };
+type CatalogItem = { code: string; name: string; default_total: number | null };
 
+type ProfileRow = { name: string | null; user_id: string } | null;
+
+// --- Component ----------------------------------------------------------------
 const Profile = () => {
   const { user } = useAuth();
   const { toast } = useToast();
   const navigate = useNavigate();
 
+  // page-level
   const [loading, setLoading] = useState(true);
+
+  // student info
   const [name, setName] = useState<string>('Student');
   const [email, setEmail] = useState<string>('');
 
+  // attendance history
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<AttendanceRecord | null>(null);
 
+  // totals (per-subject counters)
   const [totalsRows, setTotalsRows] = useState<TotalsRow[]>([]);
   const rowsBySubject = useMemo(() => {
     const m: Record<string, TotalsRow> = {};
@@ -45,12 +53,14 @@ const Profile = () => {
   const [editingTotalValue, setEditingTotalValue] = useState<number | string>('');
   const [editSaving, setEditSaving] = useState(false);
 
-  // add subject
+  // subjects catalog + add-subject (now searchable)
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  const [query, setQuery] = useState('');
   const [addSubject, setAddSubject] = useState<string>('');
   const [addTotal, setAddTotal] = useState<string>('');
   const [adding, setAdding] = useState(false);
 
+  // --- data fetch -------------------------------------------------------------
   const fetchEverything = async () => {
     if (!user) return;
     setLoading(true);
@@ -60,7 +70,7 @@ const Profile = () => {
         .from('profiles')
         .select('name, user_id')
         .eq('user_id', user.id)
-        .maybeSingle();
+        .maybeSingle<ProfileRow>();
       if (prof) setName(prof.name || 'Student');
       setEmail(user.email || '');
 
@@ -100,6 +110,7 @@ const Profile = () => {
     if (!user) return;
     fetchEverything();
 
+    // realtime subscriptions
     const chTotals = supabase
       .channel('rt-profile-totals')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_totals', filter: `student_id=eq.${user.id}` }, fetchEverything)
@@ -116,12 +127,13 @@ const Profile = () => {
     };
   }, [user]);
 
+  // utilities
   const formatDate = (dateString: string) => {
     const d = new Date(dateString);
     return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
   };
 
-  // subject edit total
+  // --- edit total -------------------------------------------------------------
   const openEditTotal = (subject: string) => {
     const r = rowsBySubject[subject];
     if (!r) return;
@@ -146,10 +158,14 @@ const Profile = () => {
         .eq('subject', editingSubject);
       if (error) throw error;
       toast({ title: 'Saved', description: 'Total updated.' });
+
+      // Optimistic local update
+      setTotalsRows(prev => prev.map(r => r.subject === editingSubject ? { ...r, total: Math.floor(parsed) } : r));
+
       setEditOpen(false);
       setEditingSubject(null);
       setEditingTotalValue('');
-      await fetchEverything();
+      // no need to refetchEverything() immediately thanks to optimistic update
     } catch (e: any) {
       toast({ title: 'Error', description: e?.message || 'Failed to update total', variant: 'destructive' });
     } finally {
@@ -157,7 +173,24 @@ const Profile = () => {
     }
   };
 
-  // add subject
+  // --- add subject (searchable) ----------------------------------------------
+  const filteredAddOptions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const existing = new Set(totalsRows.map(r => r.subject));
+    return (catalog || [])
+      .filter(c => !existing.has(c.code))
+      .filter(c => q === '' || c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+      .slice(0, 20);
+  }, [catalog, totalsRows, query]);
+
+  const handlePickSubject = (code: string) => {
+    setAddSubject(code);
+    const found = catalog.find(c => c.code === code);
+    // auto-fill addTotal with default_total if present, else keep current/add 20
+    const def = (found?.default_total ?? 20).toString();
+    setAddTotal(def);
+  };
+
   const handleAddSubject = async () => {
     if (!user) return;
     if (!addSubject) {
@@ -171,6 +204,7 @@ const Profile = () => {
     }
     setAdding(true);
     try {
+      // Use upsert direct (keeps it simple and avoids relying on RPC here)
       const { error } = await supabase.from('attendance_totals').upsert({
         student_id: user.id,
         subject: addSubject,
@@ -178,7 +212,7 @@ const Profile = () => {
       });
       if (error) throw error;
 
-      // optional: maintain selected_subjects
+      // maintain profiles.selected_subjects (optional best-effort)
       const nextSubjects = Array.from(new Set([...totalsRows.map(r => r.subject), addSubject]));
       await supabase.from('profiles').upsert({
         user_id: user.id,
@@ -186,10 +220,13 @@ const Profile = () => {
         selected_subjects: nextSubjects,
       });
 
+      // Optimistic UI update
+      setTotalsRows(prev => ([...prev, { subject: addSubject, count: 0, total: Math.floor(totalNum) }]));
+
       setAddSubject('');
       setAddTotal('');
-      toast({ title: 'Added', description: `${addSubject} added.` });
-      await fetchEverything();
+      setQuery('');
+      toast({ title: 'Added', description: `Subject ${addSubject} added.` });
     } catch (e: any) {
       toast({ title: 'Error', description: e?.message || 'Failed to add subject', variant: 'destructive' });
     } finally {
@@ -197,7 +234,7 @@ const Profile = () => {
     }
   };
 
-  // delete log + decrement
+  // --- delete log + decrement -------------------------------------------------
   const requestDeleteRecord = (rec: AttendanceRecord) => {
     setSelectedRecord(rec);
     setDeleteDialogOpen(true);
@@ -209,14 +246,19 @@ const Profile = () => {
       const { error } = await supabase.rpc('delete_log_and_decrement', { p_id: selectedRecord.id });
       if (error) throw error;
       toast({ title: 'Deleted', description: 'Attendance record removed and count updated.' });
+
+      // Optimistic UI updates
+      setAttendanceRecords(prev => prev.filter(r => r.id !== selectedRecord.id));
+      setTotalsRows(prev => prev.map(r => r.subject === selectedRecord.subject ? { ...r, count: Math.max(0, r.count - 1) } : r));
+
       setSelectedRecord(null);
       setDeleteDialogOpen(false);
-      await fetchEverything();
     } catch (e: any) {
       toast({ title: 'Error', description: e?.message || 'Failed to delete attendance', variant: 'destructive' });
     }
   };
 
+  // --- rendering --------------------------------------------------------------
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
@@ -294,29 +336,46 @@ const Profile = () => {
               </div>
             )}
 
-            {/* Add subject */}
+            {/* Add subject (searchable) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="md:col-span-1">
+              <div className="md:col-span-2 space-y-2">
                 <Label className="text-sm">Add Subject</Label>
-                <Select value={addSubject} onValueChange={(v) => setAddSubject(v)}>
-                  <SelectTrigger className="mt-1">
-                    <SelectValue placeholder="Pick a subject" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {catalog
-                      .filter(c => !totalsRows.some(r => r.subject === c.code))
-                      .map(c => <SelectItem key={c.code} value={c.code}>{c.code} — {c.name}</SelectItem>)
-                    }
-                  </SelectContent>
-                </Select>
+                <Input
+                  placeholder="Search by code or name (e.g., CN, Networks)…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="mt-1"
+                />
+                <div className="border rounded-md bg-white/80 backdrop-blur-sm max-h-56 overflow-auto">
+                  {filteredAddOptions.length === 0 ? (
+                    <div className="p-3 text-sm text-muted-foreground">No matching subjects</div>
+                  ) : (
+                    filteredAddOptions.map((c) => (
+                      <button
+                        key={c.code}
+                        type="button"
+                        className={`w-full text-left px-3 py-2 hover:bg-muted/50 ${addSubject === c.code ? 'bg-muted/40' : ''}`}
+                        onClick={() => handlePickSubject(c.code)}
+                      >
+                        <div className="font-medium">{c.code}</div>
+                        <div className="text-xs text-muted-foreground">{c.name}</div>
+                      </button>
+                    ))
+                  )}
+                </div>
               </div>
               <div className="md:col-span-1">
                 <Label className="text-sm">Total Lectures</Label>
-                <Input className="mt-1" type="number" min={0} value={addTotal} onChange={(e) => setAddTotal(e.target.value)} placeholder="e.g., 20" />
-              </div>
-              <div className="md:col-span-1 flex items-end">
-                <Button className="w-full" onClick={handleAddSubject} disabled={adding}>
-                  {adding ? 'Adding…' : 'Add'}
+                <Input
+                  className="mt-1"
+                  type="number"
+                  min={0}
+                  value={addTotal}
+                  onChange={(e) => setAddTotal(e.target.value)}
+                  placeholder="e.g., 20"
+                />
+                <Button className="w-full mt-3" onClick={handleAddSubject} disabled={adding || !addSubject}>
+                  {adding ? 'Adding…' : addSubject ? `Add ${addSubject}` : 'Add'}
                 </Button>
               </div>
             </div>
