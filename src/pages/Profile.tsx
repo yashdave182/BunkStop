@@ -59,6 +59,10 @@ const Profile = () => {
   const [addTotal, setAddTotal] = useState<string>('');
   const [adding, setAdding] = useState(false);
 
+  // delete subject confirmation
+  const [deleteSubjectDialogOpen, setDeleteSubjectDialogOpen] = useState(false);
+  const [selectedSubjectToDelete, setSelectedSubjectToDelete] = useState<string | null>(null);
+
   // --- data fetch -------------------------------------------------------------
   const fetchEverything = async () => {
     if (!user) return;
@@ -249,17 +253,26 @@ const Profile = () => {
     }
   };
 
-  // --- delete subject ---------------------------------------------------------
-  const handleDeleteSubject = async (subject: string) => {
-    if (!user) return;
-    try {
-      const { error } = await supabase.rpc('delete_subject_for_student', { p_student_id: user.id, p_subject: subject });
-      if (error) throw error;
-      toast({ title: 'Removed', description: `Subject ${subject} and all its logs deleted.` });
+  // --- delete subject with confirmation --------------------------------------
+  const confirmDeleteSubject = (subject: string) => {
+    setSelectedSubjectToDelete(subject);
+    setDeleteSubjectDialogOpen(true);
+  };
 
-      // Optimistic update
-      setTotalsRows(prev => prev.filter(r => r.subject !== subject));
-      setAttendanceRecords(prev => prev.filter(r => r.subject !== subject));
+  const handleDeleteSubject = async () => {
+    if (!user || !selectedSubjectToDelete) return;
+    try {
+      const { error } = await supabase.rpc('delete_subject_for_student', {
+        p_student_id: user.id,
+        p_subject: selectedSubjectToDelete
+      });
+      if (error) throw error;
+      toast({ title: 'Removed', description: `Subject ${selectedSubjectToDelete} and all its logs deleted.` });
+
+      setTotalsRows(prev => prev.filter(r => r.subject !== selectedSubjectToDelete));
+      setAttendanceRecords(prev => prev.filter(r => r.subject !== selectedSubjectToDelete));
+      setSelectedSubjectToDelete(null);
+      setDeleteSubjectDialogOpen(false);
     } catch (e: any) {
       toast({ title: 'Error', description: e?.message || 'Failed to remove subject', variant: 'destructive' });
     }
@@ -332,7 +345,7 @@ const Profile = () => {
                         variant="ghost"
                         size="icon"
                         className="absolute top-2 right-2 text-destructive hover:text-destructive/90"
-                        onClick={() => handleDeleteSubject(subject)}
+                        onClick={() => confirmDeleteSubject(subject)}
                       >
                         ×
                       </Button>
@@ -351,7 +364,6 @@ const Profile = () => {
                         Edit Total
                       </Button>
                     </div>
-
                   );
                 })}
               </div>
@@ -411,112 +423,92 @@ const Profile = () => {
               <span>Attendance History</span>
             </CardTitle>
           </CardHeader>
-          <CardContent>
-            {attendanceRecords.length > 0 ? (
-              <>
-                {/* Desktop table */}
-                <div className="rounded-lg border overflow-x-auto hidden md:block">
-                  <Table className="min-w-[700px]">
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Date</TableHead>
-                        <TableHead>Subject</TableHead>
-                        <TableHead>Note</TableHead>
-                        <TableHead className="w-[100px]">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {attendanceRecords.map((record) => (
-                        <TableRow key={record.id}>
-                          <TableCell className="font-medium">{formatDate(record.date)}</TableCell>
-                          <TableCell>{record.subject}</TableCell>
-                          <TableCell className="max-w-[360px] truncate">{record.note || '-'}</TableCell>
-                          <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => { setSelectedRecord(record); setDeleteDialogOpen(true); }}
-                              className="text-destructive hover:text-destructive/90"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-
-                {/* Mobile list */}
-                <div className="md:hidden space-y-3">
-                  {attendanceRecords.map((record) => (
-                    <div key={record.id} className="p-4 bg-white/80 backdrop-blur-sm rounded-lg border">
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm text-muted-foreground">{formatDate(record.date)}</div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => { setSelectedRecord(record); setDeleteDialogOpen(true); }}
-                          className="text-destructive hover:text-destructive/90"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                      <div className="font-medium">{record.subject}</div>
-                      {record.note && <div className="text-xs text-muted-foreground mt-1">{record.note}</div>}
-                    </div>
-                  ))}
-                </div>
-              </>
+          <CardContent className="overflow-x-auto">
+            {attendanceRecords.length === 0 ? (
+              <div className="text-sm text-muted-foreground">No attendance logged yet.</div>
             ) : (
-              <div className="text-center py-12">
-                <Calendar className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-                <p className="text-muted-foreground">No attendance records found</p>
-                <p className="text-sm text-muted-foreground">Go to the dashboard to start marking your attendance</p>
-              </div>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Subject</TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Note</TableHead>
+                    <TableHead className="w-16">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {attendanceRecords.map(r => (
+                    <TableRow key={r.id}>
+                      <TableCell>{r.subject}</TableCell>
+                      <TableCell>{formatDate(r.date)}</TableCell>
+                      <TableCell>{r.note || '-'}</TableCell>
+                      <TableCell>
+                        <Button variant="ghost" size="icon" onClick={() => requestDeleteRecord(r)}>
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             )}
           </CardContent>
         </Card>
       </div>
 
-      {/* Edit Total dialog */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit Subject Total</DialogTitle>
-            <DialogDescription>Change the total number of lectures for this subject.</DialogDescription>
-          </DialogHeader>
-          <div className="py-4 space-y-2">
-            <Label className="text-sm">Subject</Label>
-            <div className="font-semibold">{editingSubject}</div>
-            <Label className="text-sm mt-4">Total Lectures</Label>
-            <Input
-              type="number"
-              min={0}
-              value={editingTotalValue}
-              onChange={(e: any) => setEditingTotalValue(e.target.value === '' ? '' : Number(e.target.value))}
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button onClick={saveEditTotal} disabled={editSaving}>
-              {editSaving ? 'Saving…' : 'Save'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Delete log confirm */}
+      {/* Dialogs */}
+      {/* Delete attendance record */}
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete Attendance Record</DialogTitle>
-            <DialogDescription>This will remove the log and decrement the subject’s count.</DialogDescription>
+            <DialogDescription>Are you sure you want to delete this attendance log? This cannot be undone.</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
             <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={handleDeleteAttendance}>
               Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit total */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Total Lectures</DialogTitle>
+            <DialogDescription>Set total lectures for <strong>{editingSubject}</strong>.</DialogDescription>
+          </DialogHeader>
+          <div className="mt-2">
+            <Input
+              type="number"
+              min={0}
+              value={editingTotalValue}
+              onChange={(e) => setEditingTotalValue(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button onClick={saveEditTotal} disabled={editSaving}>{editSaving ? 'Saving…' : 'Save'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Subject */}
+      <Dialog open={deleteSubjectDialogOpen} onOpenChange={setDeleteSubjectDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Subject</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete subject <strong>{selectedSubjectToDelete}</strong>?<br />
+              This will remove all its attendance logs and cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteSubjectDialogOpen(false)}>Cancel</Button>
+            <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={handleDeleteSubject}>
+              Delete Subject
             </Button>
           </DialogFooter>
         </DialogContent>
