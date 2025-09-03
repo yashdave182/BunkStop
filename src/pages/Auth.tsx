@@ -12,36 +12,38 @@ import { useToast } from '@/hooks/use-toast';
 import { GraduationCap, X } from 'lucide-react';
 
 type CatalogItem = { code: string; name: string; default_total: number | null };
+type ChosenSubject = { code: string; name: string; total: number };
+
 const PENDING_KEY = 'pending_subject_setup_v1';
 
 const Auth = () => {
   const [isLogin, setIsLogin] = useState(true);
 
-  // auth form
+  // Auth form
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
 
-  // catalog + search
+  // Catalog + search
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
 
-  // chosen subjects
-  const [chosen, setChosen] = useState<{ code: string; name: string; total: number }[]>([]);
+  // Chosen subjects
+  const [chosen, setChosen] = useState<ChosenSubject[]>([]);
 
+  // Loading & toast
   const [loading, setLoading] = useState(false);
   const { signUp, signIn, user } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Load catalog (public; RLS must allow anon SELECT where is_active = true)
+  // Lock subjects after sending verification email
+  const [subjectsLocked, setSubjectsLocked] = useState(false);
+
+  // --- Load catalog ---
   useEffect(() => {
     (async () => {
-      // quick sanity logs (remove later if you want)
-      // console.log('VITE_SUPABASE_URL?', import.meta.env.VITE_SUPABASE_URL);
-      // console.log('Anon key present?', !!import.meta.env.VITE_SUPABASE_ANON_KEY);
-
       const { data, error } = await supabase
         .from('subjects_catalog')
         .select('code, name, default_total')
@@ -50,7 +52,6 @@ const Auth = () => {
 
       if (error) {
         setCatalogError(error.message || 'Failed to load subjects');
-        // console.error('subjects_catalog error:', error);
       } else {
         setCatalogError(null);
         setCatalog(data || []);
@@ -58,14 +59,14 @@ const Auth = () => {
     })();
   }, []);
 
-  // Redirect if already authed and no deferred onboarding pending
+  // Redirect if already authed and no pending onboarding
   useEffect(() => {
     if (!user) return;
     const hasPending = !!localStorage.getItem(PENDING_KEY);
     if (!hasPending) navigate('/dashboard', { replace: true });
   }, [user, navigate]);
 
-  // Commit deferred onboarding after email verification (when session exists)
+  // Commit deferred onboarding after email verification
   useEffect(() => {
     const run = async () => {
       if (!user) return;
@@ -73,11 +74,7 @@ const Auth = () => {
       if (!raw) return;
 
       try {
-        const data = JSON.parse(raw) as {
-          name: string;
-          codes: string[];
-          totals: number[];
-        };
+        const data = JSON.parse(raw) as { name: string; codes: string[]; totals: number[] };
 
         // 1) upsert profile
         const { error: profErr } = await supabase.from('profiles').upsert({
@@ -111,7 +108,7 @@ const Auth = () => {
     run();
   }, [user, navigate, toast]);
 
-  // Filtering the catalog by search and excluding already-chosen subjects
+  // --- Filtering catalog ---
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const picked = new Set(chosen.map(c => c.code));
@@ -121,18 +118,21 @@ const Auth = () => {
       .slice(0, 10);
   }, [query, catalog, chosen]);
 
-  // Add/remove/update chosen subjects
+  // --- Subject manipulation ---
   const addSubject = (c: CatalogItem) => {
-    const defaultTotal = (c.default_total ?? 20);
+    if (subjectsLocked) return;
+    const defaultTotal = c.default_total ?? 20;
     setChosen(prev => [...prev, { code: c.code, name: c.name, total: defaultTotal }]);
     setQuery('');
   };
 
   const removeSubject = (code: string) => {
+    if (subjectsLocked) return;
     setChosen(prev => prev.filter(s => s.code !== code));
   };
 
   const updateTotal = (code: string, value: string) => {
+    if (subjectsLocked) return;
     const n = Number(value);
     setChosen(prev =>
       prev.map(s =>
@@ -143,7 +143,7 @@ const Auth = () => {
     );
   };
 
-  // Submit handler
+  // --- Form submission ---
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -155,7 +155,7 @@ const Auth = () => {
         return;
       }
 
-      // signup path
+      // Signup validations
       if (!name.trim()) {
         toast({ title: 'Missing name', description: 'Enter your full name.', variant: 'destructive' });
         return;
@@ -170,12 +170,11 @@ const Auth = () => {
 
       const { data } = await supabase.auth.getUser();
       const userId = data.user?.id;
-
       const codes = chosen.map(s => s.code);
       const totals = chosen.map(s => s.total);
 
       if (userId) {
-        // Email confirmation OFF: we have a session, write immediately
+        // Email confirmation OFF: write immediately
         const { error: profErr } = await supabase.from('profiles').upsert({
           user_id: userId,
           name: name.trim(),
@@ -196,14 +195,14 @@ const Auth = () => {
         navigate('/dashboard');
       } else {
         // Email confirmation ON: defer via localStorage
-        localStorage.setItem(
-          PENDING_KEY,
-          JSON.stringify({ name: name.trim(), codes, totals }),
-        );
+        localStorage.setItem(PENDING_KEY, JSON.stringify({ name: name.trim(), codes, totals }));
         toast({
           title: 'Verify your email',
           description: 'After verification, your subjects will be saved automatically.',
         });
+
+        // LOCK subject selection
+        setSubjectsLocked(true);
       }
     } catch (err: any) {
       toast({ title: 'Error', description: err?.message || 'Something went wrong.', variant: 'destructive' });
@@ -212,6 +211,7 @@ const Auth = () => {
     }
   };
 
+  // --- JSX ---
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
       <Card className="w-full max-w-2xl shadow-xl">
@@ -234,18 +234,39 @@ const Auth = () => {
             {!isLogin && (
               <div className="space-y-2">
                 <Label htmlFor="name">Full Name</Label>
-                <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" required />
+                <Input
+                  id="name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Your name"
+                  required
+                />
               </div>
             )}
 
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
-              <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required />
+              <Input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                required
+              />
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
-              <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" minLength={6} required />
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                minLength={6}
+                required
+              />
             </div>
 
             {/* Signup-only: subject search + chosen list */}
@@ -254,9 +275,10 @@ const Auth = () => {
                 <Label className="text-base">Add Subjects</Label>
 
                 <Input
-                  placeholder="Search by code or name (e.g., CN, Networks)…"
+                  placeholder="Search by code or name…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
+                  disabled={subjectsLocked}
                 />
 
                 {catalogError && (
@@ -276,6 +298,7 @@ const Auth = () => {
                           type="button"
                           className="w-full text-left px-3 py-2 hover:bg-muted/50"
                           onClick={() => addSubject(c)}
+                          disabled={subjectsLocked}
                         >
                           <div className="font-medium">{c.code}</div>
                           <div className="text-xs text-muted-foreground">{c.name}</div>
@@ -296,7 +319,12 @@ const Auth = () => {
                               <div className="font-semibold">{s.code}</div>
                               <div className="text-xs text-muted-foreground">{s.name}</div>
                             </div>
-                            <button type="button" onClick={() => removeSubject(s.code)} className="p-1 hover:opacity-80">
+                            <button
+                              type="button"
+                              onClick={() => removeSubject(s.code)}
+                              className="p-1 hover:opacity-80"
+                              disabled={subjectsLocked}
+                            >
                               <X className="h-4 w-4" />
                             </button>
                           </div>
@@ -307,11 +335,17 @@ const Auth = () => {
                               min={0}
                               value={s.total}
                               onChange={(e) => updateTotal(s.code, e.target.value)}
+                              disabled={subjectsLocked}
                             />
                           </div>
                         </div>
                       ))}
                     </div>
+                    {subjectsLocked && (
+                      <div className="text-sm text-muted-foreground mt-2">
+                        Subject selection is locked until email verification is complete.
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
