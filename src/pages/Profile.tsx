@@ -12,13 +12,12 @@ import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
-import { ArrowLeft, Calendar, Trash2, User } from 'lucide-react';
+import { ArrowLeft, Calendar, Trash2, User, X } from 'lucide-react';
 
 // --- Types -------------------------------------------------------------------
 type AttendanceRecord = { id: string; subject: string; date: string; note: string | null };
 type TotalsRow = { subject: string; count: number; total: number };
 type CatalogItem = { code: string; name: string; default_total: number | null };
-
 type ProfileRow = { name: string | null; user_id: string } | null;
 
 // --- Component ----------------------------------------------------------------
@@ -53,7 +52,7 @@ const Profile = () => {
   const [editingTotalValue, setEditingTotalValue] = useState<number | string>('');
   const [editSaving, setEditSaving] = useState(false);
 
-  // subjects catalog + add-subject (now searchable)
+  // subjects catalog + add-subject
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [query, setQuery] = useState('');
   const [addSubject, setAddSubject] = useState<string>('');
@@ -122,8 +121,8 @@ const Profile = () => {
       .subscribe();
 
     return () => {
-      try { supabase.removeChannel(chTotals); } catch {}
-      try { supabase.removeChannel(chLogs); } catch {}
+      try { supabase.removeChannel(chTotals); } catch { }
+      try { supabase.removeChannel(chLogs); } catch { }
     };
   }, [user]);
 
@@ -159,13 +158,11 @@ const Profile = () => {
       if (error) throw error;
       toast({ title: 'Saved', description: 'Total updated.' });
 
-      // Optimistic local update
       setTotalsRows(prev => prev.map(r => r.subject === editingSubject ? { ...r, total: Math.floor(parsed) } : r));
 
       setEditOpen(false);
       setEditingSubject(null);
       setEditingTotalValue('');
-      // no need to refetchEverything() immediately thanks to optimistic update
     } catch (e: any) {
       toast({ title: 'Error', description: e?.message || 'Failed to update total', variant: 'destructive' });
     } finally {
@@ -186,7 +183,6 @@ const Profile = () => {
   const handlePickSubject = (code: string) => {
     setAddSubject(code);
     const found = catalog.find(c => c.code === code);
-    // auto-fill addTotal with default_total if present, else keep current/add 20
     const def = (found?.default_total ?? 20).toString();
     setAddTotal(def);
   };
@@ -204,7 +200,6 @@ const Profile = () => {
     }
     setAdding(true);
     try {
-      // Use upsert direct (keeps it simple and avoids relying on RPC here)
       const { error } = await supabase.from('attendance_totals').upsert({
         student_id: user.id,
         subject: addSubject,
@@ -212,7 +207,6 @@ const Profile = () => {
       });
       if (error) throw error;
 
-      // maintain profiles.selected_subjects (optional best-effort)
       const nextSubjects = Array.from(new Set([...totalsRows.map(r => r.subject), addSubject]));
       await supabase.from('profiles').upsert({
         user_id: user.id,
@@ -220,9 +214,7 @@ const Profile = () => {
         selected_subjects: nextSubjects,
       });
 
-      // Optimistic UI update
       setTotalsRows(prev => ([...prev, { subject: addSubject, count: 0, total: Math.floor(totalNum) }]));
-
       setAddSubject('');
       setAddTotal('');
       setQuery('');
@@ -247,7 +239,6 @@ const Profile = () => {
       if (error) throw error;
       toast({ title: 'Deleted', description: 'Attendance record removed and count updated.' });
 
-      // Optimistic UI updates
       setAttendanceRecords(prev => prev.filter(r => r.id !== selectedRecord.id));
       setTotalsRows(prev => prev.map(r => r.subject === selectedRecord.subject ? { ...r, count: Math.max(0, r.count - 1) } : r));
 
@@ -255,6 +246,22 @@ const Profile = () => {
       setDeleteDialogOpen(false);
     } catch (e: any) {
       toast({ title: 'Error', description: e?.message || 'Failed to delete attendance', variant: 'destructive' });
+    }
+  };
+
+  // --- delete subject ---------------------------------------------------------
+  const handleDeleteSubject = async (subject: string) => {
+    if (!user) return;
+    try {
+      const { error } = await supabase.rpc('delete_subject_for_student', { p_student_id: user.id, p_subject: subject });
+      if (error) throw error;
+      toast({ title: 'Removed', description: `Subject ${subject} and all its logs deleted.` });
+
+      // Optimistic update
+      setTotalsRows(prev => prev.filter(r => r.subject !== subject));
+      setAttendanceRecords(prev => prev.filter(r => r.subject !== subject));
+    } catch (e: any) {
+      toast({ title: 'Error', description: e?.message || 'Failed to remove subject', variant: 'destructive' });
     }
   };
 
@@ -319,18 +326,32 @@ const Profile = () => {
                 {totalsRows.map(({ subject, count, total }) => {
                   const pct = total > 0 ? Math.round(Math.min(count, total) / total * 100) : null;
                   return (
-                    <div key={subject} className="p-4 bg-muted/50 rounded-lg flex flex-col gap-2">
-                      <div className="flex items-center justify-between">
-                        <div className="font-semibold">{subject}</div>
-                        <Button variant="outline" size="sm" onClick={() => openEditTotal(subject)}>
-                          Edit Total
-                        </Button>
-                      </div>
+                    <div key={subject} className="p-4 bg-muted/50 rounded-lg relative flex flex-col gap-2">
+                      {/* Delete cross */}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="absolute top-2 right-2 text-destructive hover:text-destructive/90"
+                        onClick={() => handleDeleteSubject(subject)}
+                      >
+                        ×
+                      </Button>
+
+                      {/* Subject Name */}
+                      <div className="font-semibold">{subject}</div>
+
+                      {/* Attendance info */}
                       <div className="text-sm text-muted-foreground">
                         {total > 0 ? `${Math.min(count, total)} / ${total}` : `${count}`} attended
                       </div>
                       {pct !== null && <div className="text-xs text-muted-foreground">{pct}%</div>}
+
+                      {/* Edit Total Button */}
+                      <Button variant="outline" size="sm" onClick={() => openEditTotal(subject)}>
+                        Edit Total
+                      </Button>
                     </div>
+
                   );
                 })}
               </div>
