@@ -11,37 +11,41 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { GraduationCap, X } from 'lucide-react';
 
+// -------------------- Types --------------------
 type CatalogItem = { code: string; name: string; default_total: number | null };
 type ChosenSubject = { code: string; name: string; total: number };
 
+// LocalStorage key used for deferred onboarding
 const PENDING_KEY = 'pending_subject_setup_v1';
 
+// -------------------- Component --------------------
 const Auth = () => {
-  const [isLogin, setIsLogin] = useState(true);
+  // -------------------- State --------------------
+  const [isLogin, setIsLogin] = useState(true); // Toggle between Login / Signup
 
-  // Auth form
+  // Form fields
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
 
-  // Catalog + search
+  // Catalog state
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
 
-  // Chosen subjects
+  // Subjects chosen by user
   const [chosen, setChosen] = useState<ChosenSubject[]>([]);
 
-  // Loading & toast
+  // Misc UI states
   const [loading, setLoading] = useState(false);
+  const [subjectsLocked, setSubjectsLocked] = useState(false); // Lock after signup until verification
+
+  // Hooks
   const { signUp, signIn, user } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Lock subjects after sending verification email
-  const [subjectsLocked, setSubjectsLocked] = useState(false);
-
-  // --- Load catalog ---
+  // -------------------- Load catalog from DB --------------------
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
@@ -59,14 +63,14 @@ const Auth = () => {
     })();
   }, []);
 
-  // Redirect if already authed and no pending onboarding
+  // -------------------- Auto redirect if logged in --------------------
   useEffect(() => {
     if (!user) return;
     const hasPending = !!localStorage.getItem(PENDING_KEY);
     if (!hasPending) navigate('/dashboard', { replace: true });
   }, [user, navigate]);
 
-  // Commit deferred onboarding after email verification
+  // -------------------- Run onboarding after email verification --------------------
   useEffect(() => {
     const run = async () => {
       if (!user) return;
@@ -76,23 +80,29 @@ const Auth = () => {
       try {
         const data = JSON.parse(raw) as { name: string; codes: string[]; totals: number[] };
 
-        // 1) upsert profile
-        const { error: profErr } = await supabase.from('profiles').upsert({
-          user_id: user.id,
-          name: data.name ?? '',
-          selected_subjects: data.codes,
-          onboarding_complete: true,
-        });
-        if (profErr) throw profErr;
+        // Run RPC that handles both profile + totals atomically
+        // Get current session to extract the authenticated user's ID
+        const { data: { session } } = await supabase.auth.getSession();
+console.log("Session user id:", session?.user?.id);
 
-        // 2) create totals rows via RPC
-        const { error: rpcErr } = await supabase.rpc('set_subject_totals', {
-          p_subjects: data.codes,
-          p_totals: data.totals,
-        });
-        if (rpcErr) throw rpcErr;
+const { error: rpcErr } = await supabase.rpc('complete_onboarding_v2', {
+  p_uid: session?.user?.id,
+  p_name: data.name,
+  p_subjects: data.codes,
+  p_totals: data.totals,
+});
+
+if (rpcErr) {
+  console.error("RPC error:", rpcErr);
+  throw rpcErr;
+}
+
 
         localStorage.removeItem(PENDING_KEY);
+
+        // Force refresh so subjects show up immediately on first login
+        await supabase.auth.refreshSession();
+
         toast({ title: 'Welcome!', description: 'Your subjects were saved.' });
         navigate('/dashboard', { replace: true });
       } catch (e: any) {
@@ -108,7 +118,7 @@ const Auth = () => {
     run();
   }, [user, navigate, toast]);
 
-  // --- Filtering catalog ---
+  // -------------------- Catalog filtering --------------------
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const picked = new Set(chosen.map(c => c.code));
@@ -118,7 +128,7 @@ const Auth = () => {
       .slice(0, 10);
   }, [query, catalog, chosen]);
 
-  // --- Subject manipulation ---
+  // -------------------- Subject manipulation --------------------
   const addSubject = (c: CatalogItem) => {
     if (subjectsLocked) return;
     const defaultTotal = c.default_total ?? 20;
@@ -143,19 +153,20 @@ const Auth = () => {
     );
   };
 
-  // --- Form submission ---
+  // -------------------- Form submit (Signup/Login) --------------------
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
       if (isLogin) {
+        // -------------------- LOGIN --------------------
         const { error } = await signIn(email, password);
         if (error) throw error;
         navigate('/dashboard');
         return;
       }
 
-      // Signup validations
+      // -------------------- SIGNUP --------------------
       if (!name.trim()) {
         toast({ title: 'Missing name', description: 'Enter your full name.', variant: 'destructive' });
         return;
@@ -168,42 +179,17 @@ const Auth = () => {
       const { error } = await signUp(email, password, name);
       if (error) throw error;
 
-      const { data } = await supabase.auth.getUser();
-      const userId = data.user?.id;
+      // Always defer onboarding until email verification
       const codes = chosen.map(s => s.code);
       const totals = chosen.map(s => s.total);
+      localStorage.setItem(PENDING_KEY, JSON.stringify({ name: name.trim(), codes, totals }));
 
-      if (userId) {
-        // Email confirmation OFF: write immediately
-        const { error: profErr } = await supabase.from('profiles').upsert({
-          user_id: userId,
-          name: name.trim(),
-          selected_subjects: codes,
-          onboarding_complete: true,
-        });
-        if (profErr) throw profErr;
+      toast({
+        title: 'Verify your email',
+        description: 'After verification, your subjects will be saved automatically.',
+      });
 
-        const { error: rpcErr } = await supabase.rpc('set_subject_totals', {
-          p_subjects: codes,
-          p_totals: totals,
-        });
-        if (rpcErr) {
-          toast({ title: 'Subject setup failed', description: rpcErr.message, variant: 'destructive' });
-        } else {
-          toast({ title: 'Account created', description: 'Your subjects were saved.' });
-        }
-        navigate('/dashboard');
-      } else {
-        // Email confirmation ON: defer via localStorage
-        localStorage.setItem(PENDING_KEY, JSON.stringify({ name: name.trim(), codes, totals }));
-        toast({
-          title: 'Verify your email',
-          description: 'After verification, your subjects will be saved automatically.',
-        });
-
-        // LOCK subject selection
-        setSubjectsLocked(true);
-      }
+      setSubjectsLocked(true); // prevent changing subjects until verified
     } catch (err: any) {
       toast({ title: 'Error', description: err?.message || 'Something went wrong.', variant: 'destructive' });
     } finally {
@@ -211,10 +197,11 @@ const Auth = () => {
     }
   };
 
-  // --- JSX ---
+  // -------------------- JSX --------------------
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
       <Card className="w-full max-w-2xl shadow-xl">
+        {/* Header */}
         <CardHeader className="text-center space-y-4">
           <div className="flex justify-center">
             <div className="p-3 bg-primary rounded-full">
@@ -229,8 +216,11 @@ const Auth = () => {
           </div>
         </CardHeader>
 
+        {/* Content */}
         <CardContent className="space-y-6">
+          {/* Auth Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Signup only: Name */}
             {!isLogin && (
               <div className="space-y-2">
                 <Label htmlFor="name">Full Name</Label>
@@ -244,6 +234,7 @@ const Auth = () => {
               </div>
             )}
 
+            {/* Email */}
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -256,6 +247,7 @@ const Auth = () => {
               />
             </div>
 
+            {/* Password */}
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
               <Input
@@ -269,11 +261,12 @@ const Auth = () => {
               />
             </div>
 
-            {/* Signup-only: subject search + chosen list */}
+            {/* Signup-only: Subject selection */}
             {!isLogin && (
               <div className="space-y-3">
                 <Label className="text-base">Add Subjects</Label>
 
+                {/* Search field */}
                 <Input
                   placeholder="Search by code or name…"
                   value={query}
@@ -281,12 +274,14 @@ const Auth = () => {
                   disabled={subjectsLocked}
                 />
 
+                {/* Catalog error */}
                 {catalogError && (
                   <div className="text-sm text-red-600 border border-red-200 bg-red-50 rounded p-2">
                     {catalogError}
                   </div>
                 )}
 
+                {/* Filtered search results */}
                 {query.trim() !== '' && (
                   <div className="border rounded-md bg-white/80 backdrop-blur-sm max-h-56 overflow-auto">
                     {filtered.length === 0 ? (
@@ -308,6 +303,7 @@ const Auth = () => {
                   </div>
                 )}
 
+                {/* Chosen subjects */}
                 {chosen.length > 0 && (
                   <div className="space-y-2">
                     <Label className="text-sm">Selected</Label>
@@ -351,11 +347,13 @@ const Auth = () => {
               </div>
             )}
 
+            {/* Submit button */}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? (isLogin ? 'Signing in…' : 'Creating account…') : isLogin ? 'Sign In' : 'Create Account'}
             </Button>
           </form>
 
+          {/* Switch Login/Signup */}
           <div className="text-center">
             <Button variant="link" onClick={() => setIsLogin(!isLogin)} className="text-sm">
               {isLogin ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
