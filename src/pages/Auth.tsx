@@ -20,32 +20,23 @@ const PENDING_KEY = 'pending_subject_setup_v1';
 
 // -------------------- Component --------------------
 const Auth = () => {
-  // -------------------- State --------------------
-  const [isLogin, setIsLogin] = useState(true); // Toggle between Login / Signup
-
-  // Form fields
+  const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
 
-  // Catalog state
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-
-  // Subjects chosen by user
   const [chosen, setChosen] = useState<ChosenSubject[]>([]);
-
-  // Misc UI states
   const [loading, setLoading] = useState(false);
-  const [subjectsLocked, setSubjectsLocked] = useState(false); // Lock after signup until verification
+  const [subjectsLocked, setSubjectsLocked] = useState(false);
 
-  // Hooks
   const { signUp, signIn, user } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // -------------------- Load catalog from DB --------------------
+  // -------------------- Load catalog --------------------
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
@@ -63,14 +54,14 @@ const Auth = () => {
     })();
   }, []);
 
-  // -------------------- Auto redirect if logged in --------------------
+  // -------------------- Auto redirect --------------------
   useEffect(() => {
     if (!user) return;
     const hasPending = !!localStorage.getItem(PENDING_KEY);
     if (!hasPending) navigate('/dashboard', { replace: true });
   }, [user, navigate]);
 
-  // -------------------- Run onboarding after email verification --------------------
+  // -------------------- Complete onboarding after verification --------------------
   useEffect(() => {
     const run = async () => {
       if (!user) return;
@@ -80,27 +71,17 @@ const Auth = () => {
       try {
         const data = JSON.parse(raw) as { name: string; codes: string[]; totals: number[] };
 
-        // Run RPC that handles both profile + totals atomically
-        // Get current session to extract the authenticated user's ID
         const { data: { session } } = await supabase.auth.getSession();
-console.log("Session user id:", session?.user?.id);
 
-const { error: rpcErr } = await supabase.rpc('complete_onboarding_v2', {
-  p_uid: session?.user?.id,
-  p_name: data.name,
-  p_subjects: data.codes,
-  p_totals: data.totals,
-});
-
-if (rpcErr) {
-  console.error("RPC error:", rpcErr);
-  throw rpcErr;
-}
-
+        await supabase.rpc('complete_onboarding_v2', {
+          p_uid: session?.user?.id,
+          p_name: data.name,
+          p_subjects: data.codes,
+          p_totals: data.totals,
+        });
 
         localStorage.removeItem(PENDING_KEY);
 
-        // Force refresh so subjects show up immediately on first login
         await supabase.auth.refreshSession();
 
         toast({ title: 'Welcome!', description: 'Your subjects were saved.' });
@@ -153,20 +134,18 @@ if (rpcErr) {
     );
   };
 
-  // -------------------- Form submit (Signup/Login) --------------------
+  // -------------------- Form submit --------------------
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
       if (isLogin) {
-        // -------------------- LOGIN --------------------
         const { error } = await signIn(email, password);
         if (error) throw error;
         navigate('/dashboard');
         return;
       }
 
-      // -------------------- SIGNUP --------------------
       if (!name.trim()) {
         toast({ title: 'Missing name', description: 'Enter your full name.', variant: 'destructive' });
         return;
@@ -179,7 +158,6 @@ if (rpcErr) {
       const { error } = await signUp(email, password, name);
       if (error) throw error;
 
-      // Always defer onboarding until email verification
       const codes = chosen.map(s => s.code);
       const totals = chosen.map(s => s.total);
       localStorage.setItem(PENDING_KEY, JSON.stringify({ name: name.trim(), codes, totals }));
@@ -189,7 +167,7 @@ if (rpcErr) {
         description: 'After verification, your subjects will be saved automatically.',
       });
 
-      setSubjectsLocked(true); // prevent changing subjects until verified
+      setSubjectsLocked(true);
     } catch (err: any) {
       toast({ title: 'Error', description: err?.message || 'Something went wrong.', variant: 'destructive' });
     } finally {
@@ -201,7 +179,6 @@ if (rpcErr) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
       <Card className="w-full max-w-2xl shadow-xl">
-        {/* Header */}
         <CardHeader className="text-center space-y-4">
           <div className="flex justify-center">
             <div className="p-3 bg-primary rounded-full">
@@ -216,11 +193,8 @@ if (rpcErr) {
           </div>
         </CardHeader>
 
-        {/* Content */}
         <CardContent className="space-y-6">
-          {/* Auth Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Signup only: Name */}
             {!isLogin && (
               <div className="space-y-2">
                 <Label htmlFor="name">Full Name</Label>
@@ -234,7 +208,6 @@ if (rpcErr) {
               </div>
             )}
 
-            {/* Email */}
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -247,7 +220,6 @@ if (rpcErr) {
               />
             </div>
 
-            {/* Password */}
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
               <Input
@@ -261,27 +233,20 @@ if (rpcErr) {
               />
             </div>
 
-            {/* Signup-only: Subject selection */}
             {!isLogin && (
               <div className="space-y-3">
                 <Label className="text-base">Add Subjects</Label>
-
-                {/* Search field */}
                 <Input
                   placeholder="Search by code or name…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   disabled={subjectsLocked}
                 />
-
-                {/* Catalog error */}
                 {catalogError && (
                   <div className="text-sm text-red-600 border border-red-200 bg-red-50 rounded p-2">
                     {catalogError}
                   </div>
                 )}
-
-                {/* Filtered search results */}
                 {query.trim() !== '' && (
                   <div className="border rounded-md bg-white/80 backdrop-blur-sm max-h-56 overflow-auto">
                     {filtered.length === 0 ? (
@@ -302,8 +267,6 @@ if (rpcErr) {
                     )}
                   </div>
                 )}
-
-                {/* Chosen subjects */}
                 {chosen.length > 0 && (
                   <div className="space-y-2">
                     <Label className="text-sm">Selected</Label>
@@ -347,13 +310,11 @@ if (rpcErr) {
               </div>
             )}
 
-            {/* Submit button */}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? (isLogin ? 'Signing in…' : 'Creating account…') : isLogin ? 'Sign In' : 'Create Account'}
             </Button>
           </form>
 
-          {/* Switch Login/Signup */}
           <div className="text-center">
             <Button variant="link" onClick={() => setIsLogin(!isLogin)} className="text-sm">
               {isLogin ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
